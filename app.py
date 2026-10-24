@@ -82,6 +82,11 @@ def normalize(df):
                 "Date কলাম বা DatetimeIndex পাওয়া যায়নি।"
             )
 
+    # Ordinary Close আছে কিনা আগে দেখে নিই
+    has_plain_close = any(
+        str(c).strip().lower() == "close" for c in df.columns
+    )
+
     rename = {}
 
     for col in df.columns:
@@ -98,8 +103,8 @@ def normalize(df):
         elif key in ("close", "c"):
             rename[col] = "Close"
         elif key in ("adj close", "adjusted close", "adjclose"):
-            # Use adjusted close only if ordinary Close is absent
-            if "Close" not in rename.values():
+            # Adjusted close শুধু তখনই, যখন ordinary Close নেই
+            if not has_plain_close:
                 rename[col] = "Close"
         elif key in ("volume", "vol", "v"):
             rename[col] = "Volume"
@@ -108,12 +113,22 @@ def normalize(df):
 
     df = df.rename(columns=rename)
 
+    # Duplicate column নাম থাকলে প্রথমটা রাখি
+    df = df.loc[:, ~df.columns.duplicated()]
+
     if "Date" not in df.columns:
         raise ValueError("Date কলাম পাওয়া যায়নি।")
 
-    df["Date"] = pd.to_datetime(
-        df["Date"], errors="coerce", utc=True
-    ).dt.tz_convert(None)
+    try:
+        dates = pd.to_datetime(df["Date"], errors="coerce")
+        if getattr(dates.dt, "tz", None) is not None:
+            dates = dates.dt.tz_localize(None)
+    except Exception:
+        dates = pd.to_datetime(
+            df["Date"], errors="coerce", utc=True
+        ).dt.tz_localize(None)
+
+    df["Date"] = dates.dt.normalize()
 
     df = df.dropna(subset=["Date"]).copy()
 
@@ -143,6 +158,8 @@ def normalize(df):
 
     if df.empty:
         raise ValueError("যাচাইয়ের পরে কোনো valid OHLC data নেই।")
+
+    df["Volume"] = df["Volume"].fillna(0)
 
     return df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
 
@@ -186,6 +203,9 @@ def load_pair(
             raise ValueError(
                 "CSV mode-এ Stock এবং Benchmark—দুটি CSV-ই আপলোড করুন।"
             )
+
+        stock_csv.seek(0)
+        bench_csv.seek(0)
 
         stock_file = pd.read_csv(stock_csv)
         bench_file = pd.read_csv(bench_csv)
@@ -459,7 +479,7 @@ with tab1:
             data = joined_data(stock, bench)
 
             if data.empty:
-                st.error("Stock ও benchmark-এর common dates নেই.")
+                st.error("Stock ও benchmark-এর common dates নেই।")
             else:
                 stock_return = ret(data["Stock"], 20)
                 bench_return = ret(data["Benchmark"], 20)
@@ -648,18 +668,13 @@ with tab3:
                 if item.strip()
             ][:limit]
 
-            if exchange.startswith("NSE"):
-                symbols = [
-                    item if "." in item or item.startswith("^")
-                    else item + ".NS"
-                    for item in symbols
-                ]
-            else:
-                symbols = [
-                    item if "." in item or item.startswith("^")
-                    else item + ".BO"
-                    for item in symbols
-                ]
+            suffix = ".NS" if exchange.startswith("NSE") else ".BO"
+
+            symbols = [
+                item if "." in item or item.startswith("^")
+                else item + suffix
+                for item in symbols
+            ]
 
             rows = []
             errors = []
@@ -699,14 +714,4 @@ with tab3:
 
                         trend_pass = bool(
                             pd.notna(latest["SMA50"])
-                            and latest["Close"] > latest["SMA50"]
-                        )
-
-                        volume_pass = bool(
-                            pd.notna(latest["AvgVol20"])
-                            and latest["Volume"] > latest["AvgVol20"]
-                        )
-
-                        checks = []
-
-                        if trend_o
+          
