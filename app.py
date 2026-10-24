@@ -5,6 +5,10 @@ import yfinance as yf
 import plotly.graph_objects as go
 from datetime import date, timedelta
 
+# =========================================================
+# TradeLab Pro: RS + Scanner + Backtesting + Dashboard
+# =========================================================
+
 st.set_page_config(
     page_title="TradeLab Pro",
     page_icon="📊",
@@ -13,203 +17,213 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-.stApp {background:#0b1120;color:#e2e8f0}
-[data-testid="stSidebar"] {background:#111827}
+.stApp {
+    background: #0b1120;
+    color: #e2e8f0;
+}
+[data-testid="stSidebar"] {
+    background: #111827;
+}
 [data-testid="stMetric"] {
- background:#1e293b;border:1px solid #334155;
- padding:12px;border-radius:12px
+    background: #1e293b;
+    border: 1px solid #334155;
+    padding: 12px;
+    border-radius: 12px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("TradeLab Pro — RS + Scanner + Backtesting")
-st.caption("Indian cash equities | Historical research | No order execution")
+st.title("📊 TradeLab Pro")
+st.caption(
+    "Relative Strength • Cash Market Scanner • Backtesting • Dashboard"
+)
 
-
-# --------------------------------------------------
-# 1. DATA NORMALIZATION
-# --------------------------------------------------
+# -------------------- Data normalization --------------------
 
 def normalize(df):
-    df = df.copy()
+    """Normalize Yahoo Finance or CSV OHLCV data."""
 
-    if df.empty:
+    if df is None or df.empty:
         raise ValueError("কোনো ডেটা পাওয়া যায়নি।")
+
+    df = df.copy()
 
     # Handle Yahoo Finance MultiIndex columns
     if isinstance(df.columns, pd.MultiIndex):
-        fields = {
-            "date", "datetime", "timestamp", "open",
-            "high", "low", "close", "adj close",
-            "adjclose", "volume", "symbol", "ticker"
-        }
+        selected_level = None
 
-        chosen_level = None
         for level in range(df.columns.nlevels):
-            vals = {
-                str(x).strip().lower()
-                for x in df.columns.get_level_values(level)
+            values = {
+                str(v).strip().lower()
+                for v in df.columns.get_level_values(level)
             }
-            if vals & fields:
-                chosen_level = level
+            if "close" in values:
+                selected_level = level
                 break
 
-        if chosen_level is None:
-            raise ValueError("ডেটার কলাম শনাক্ত করা যায়নি।")
+        if selected_level is None:
+            raise ValueError(
+                "Yahoo Finance columns-এ Close field পাওয়া যায়নি।"
+            )
 
-        df.columns = df.columns.get_level_values(chosen_level)
+        df.columns = df.columns.get_level_values(selected_level)
 
     df.columns = [str(c).strip() for c in df.columns]
-    df = df.loc[:, ~pd.Index(df.columns).duplicated()]
+
+    # Move date index into a column
+    if not any(str(c).lower() in ("date", "datetime", "timestamp", "time")
+               for c in df.columns):
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+            first_col = df.columns[0]
+            df = df.rename(columns={first_col: "Date"})
+        else:
+            raise ValueError(
+                "Date কলাম বা DatetimeIndex পাওয়া যায়নি।"
+            )
 
     rename = {}
-    for c in df.columns:
-        k = c.lower().replace("_", " ").strip()
 
-        if k in ("date", "datetime", "timestamp", "time", "index"):
-            rename[c] = "Date"
-        elif k in ("open", "o"):
-            rename[c] = "Open"
-        elif k in ("high", "h"):
-            rename[c] = "High"
-        elif k in ("low", "l"):
-            rename[c] = "Low"
-        elif k in ("close", "c", "adj close", "adjclose",
-                   "adjusted close"):
+    for col in df.columns:
+        key = str(col).strip().lower().replace("_", " ")
+
+        if key in ("date", "datetime", "timestamp", "time"):
+            rename[col] = "Date"
+        elif key in ("open", "o"):
+            rename[col] = "Open"
+        elif key in ("high", "h"):
+            rename[col] = "High"
+        elif key in ("low", "l"):
+            rename[col] = "Low"
+        elif key in ("close", "c"):
+            rename[col] = "Close"
+        elif key in ("adj close", "adjusted close", "adjclose"):
+            # Use adjusted close only if ordinary Close is absent
             if "Close" not in rename.values():
-                rename[c] = "Close"
-        elif k in ("volume", "vol", "v"):
-            rename[c] = "Volume"
-        elif k in ("symbol", "ticker", "scrip"):
-            rename[c] = "Symbol"
+                rename[col] = "Close"
+        elif key in ("volume", "vol", "v"):
+            rename[col] = "Volume"
+        elif key in ("symbol", "ticker", "scrip"):
+            rename[col] = "Symbol"
 
     df = df.rename(columns=rename)
 
     if "Date" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df.index.name = "Date"
-            df = df.reset_index()
-        else:
-            raise ValueError("Date কলাম পাওয়া যায়নি।")
+        raise ValueError("Date কলাম পাওয়া যায়নি।")
 
     df["Date"] = pd.to_datetime(
         df["Date"], errors="coerce", utc=True
     ).dt.tz_convert(None)
 
-    df = df.dropna(subset=["Date"]).sort_values("Date")
+    df = df.dropna(subset=["Date"]).copy()
 
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
-        if c not in df.columns:
-            if c == "Volume":
-                df[c] = 0.0
+    # Keep only the fields needed for OHLCV calculations
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col not in df.columns:
+            if col == "Volume":
+                df[col] = 0
             else:
-                raise ValueError(f"প্রয়োজনীয় কলাম নেই: {c}")
+                raise ValueError(f"প্রয়োজনীয় কলাম নেই: {col}")
 
-        col = df[c]
-        if isinstance(col, pd.DataFrame):
-            col = col.iloc[:, 0]
-
-        df[c] = pd.to_numeric(col, errors="coerce")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
     df = df[
-        (df["Open"] > 0) &
         (df["Close"] > 0) &
-        (df["High"] >= df["Low"])
-    ]
+        (df["High"] >= df["Low"]) &
+        (df["Open"] > 0)
+    ].copy()
 
     df = (
         df.drop_duplicates("Date", keep="last")
-          .sort_values("Date")
-          .set_index("Date")
+        .sort_values("Date")
+        .set_index("Date")
     )
 
     if df.empty:
-        raise ValueError("যাচাইয়ের পরে কোনো বৈধ ডেটা নেই।")
+        raise ValueError("যাচাইয়ের পরে কোনো valid OHLC data নেই।")
 
     return df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
 
 
-# --------------------------------------------------
-# 2. YAHOO FINANCE
-# --------------------------------------------------
-
 @st.cache_data(ttl=900, show_spinner=False)
 def yahoo(ticker, start, end):
-    d = yf.download(
+    """Download historical data from Yahoo Finance."""
+
+    data = yf.download(
         ticker,
-        start=str(start),
-        end=str(end),
+        start=start,
+        end=end,
         auto_adjust=False,
         progress=False,
         threads=False,
         group_by="column",
-        timeout=20
+        timeout=25
     )
 
-    if d is None or d.empty:
+    if data is None or data.empty:
         raise ValueError(
-            f"{ticker}: ডেটা পাওয়া যায়নি। "
-            "Ticker, date range বা Yahoo Finance connection পরীক্ষা করুন।"
+            f"{ticker}: Yahoo Finance ডেটা পাওয়া যায়নি। "
+            "Ticker, date range বা network যাচাই করুন।"
         )
 
-    return normalize(d)
+    return normalize(data)
 
 
-def load_pair(symbol, source, stock_file, bench_file,
-              csv_symbol, start, end, benchmark):
+def load_pair(
+    symbol, source, stock_csv, bench_csv,
+    csv_symbol, start, end, benchmark
+):
+    """Load stock and benchmark data."""
 
     if source == "Yahoo Finance":
-        stock = yahoo(symbol, start, end)
-        bench = yahoo(benchmark, start, end)
+        stock = yahoo(symbol, str(start), str(end))
+        bench = yahoo(benchmark, str(start), str(end))
+
     else:
-        if stock_file is None or bench_file is None:
-            raise ValueError("Stock এবং Benchmark—দুটি CSV আপলোড করুন।")
+        if stock_csv is None or bench_csv is None:
+            raise ValueError(
+                "CSV mode-এ Stock এবং Benchmark—দুটি CSV-ই আপলোড করুন।"
+            )
 
-        stock_file.seek(0)
-        bench_file.seek(0)
-        sf = pd.read_csv(stock_file)
-        bf = pd.read_csv(bench_file)
+        stock_file = pd.read_csv(stock_csv)
+        bench_file = pd.read_csv(bench_csv)
 
-        if "Symbol" in sf.columns:
+        if "Symbol" in stock_file.columns:
             if not csv_symbol:
-                raise ValueError("Stock CSV থেকে Symbol নির্বাচন করুন.")
-            sf = sf[
-                sf["Symbol"].astype(str).str.upper()
+                raise ValueError("Stock CSV থেকে একটি Symbol নির্বাচন করুন।")
+
+            stock_file = stock_file[
+                stock_file["Symbol"].astype(str).str.upper()
                 == str(csv_symbol).upper()
             ].drop(columns=["Symbol"])
 
-        stock = normalize(sf)
-        bench = normalize(bf)
+        stock = normalize(stock_file)
+        bench = normalize(bench_file)
 
-    stock = stock.loc[
-        (stock.index >= pd.Timestamp(start)) &
-        (stock.index < pd.Timestamp(end))
-    ]
-    bench = bench.loc[
-        (bench.index >= pd.Timestamp(start)) &
-        (bench.index < pd.Timestamp(end))
-    ]
+    stock = stock.loc[str(start):str(end)]
+    bench = bench.loc[str(start):str(end)]
+
+    if stock.empty or bench.empty:
+        raise ValueError("নির্বাচিত তারিখে পর্যাপ্ত ডেটা নেই।")
 
     return stock, bench
 
 
-# --------------------------------------------------
-# 3. CALCULATIONS
-# --------------------------------------------------
+# -------------------- Core calculations --------------------
 
 def ret(series, n):
-    series = pd.to_numeric(series, errors="coerce").dropna()
     if len(series) <= n:
         return np.nan
 
-    first = float(series.iloc[-n-1])
-    last = float(series.iloc[-1])
+    previous = series.iloc[-n - 1]
+    latest = series.iloc[-1]
 
-    if first == 0:
+    if previous == 0:
         return np.nan
 
-    return (last / first - 1) * 100
+    return (latest / previous - 1) * 100
 
 
 def joined_data(stock, bench):
@@ -218,204 +232,294 @@ def joined_data(stock, bench):
             stock["Close"].rename("Stock"),
             bench["Close"].rename("Benchmark")
         ],
-        axis=1,
-        join="inner"
-    ).dropna().sort_index()
+        axis=1
+    ).dropna()
 
 
-def rs_stats(j, periods):
+def rs_stats(data, periods):
     rows = []
 
     for n in periods:
-        sr = ret(j["Stock"], n)
-        br = ret(j["Benchmark"], n)
+        stock_return = ret(data["Stock"], n)
+        bench_return = ret(data["Benchmark"], n)
+
+        if pd.notna(stock_return) and pd.notna(bench_return):
+            excess = stock_return - bench_return
+
+            if bench_return != -100:
+                ratio = (
+                    (1 + stock_return / 100) /
+                    (1 + bench_return / 100)
+                )
+            else:
+                ratio = np.nan
+        else:
+            excess = np.nan
+            ratio = np.nan
 
         rows.append({
             "Window (trading days)": n,
-            "Stock Return %": sr,
-            "Benchmark Return %": br,
-            "Excess Return (pp)": (
-                sr - br if pd.notna(sr) and pd.notna(br) else np.nan
-            ),
-            "Relative Ratio": (
-                (1 + sr / 100) / (1 + br / 100)
-                if pd.notna(sr) and pd.notna(br) and br != -100
-                else np.nan
-            ),
-            "Common dates": len(j)
+            "Stock Return %": stock_return,
+            "Benchmark Return %": bench_return,
+            "Excess Return (pp)": excess,
+            "Relative Ratio": ratio,
+            "Common Dates": len(data)
         })
 
     return pd.DataFrame(rows)
 
 
 def indicators(stock):
-    x = stock.copy()
-    x["SMA50"] = x["Close"].rolling(50).mean()
-    x["AvgVol20"] = x["Volume"].rolling(20).mean()
-    x["High20Prev"] = x["High"].shift(1).rolling(20).max()
-    return x
+    result = stock.copy()
+    result["SMA50"] = result["Close"].rolling(50).mean()
+    result["AvgVol20"] = result["Volume"].rolling(20).mean()
+    result["High20Prev"] = result["High"].shift(1).rolling(20).max()
+    return result
 
-
-# --------------------------------------------------
-# 4. BACKTEST
-# --------------------------------------------------
 
 def backtest(stock, bench, rs_window, sma, capital, cost_bps):
-    j = joined_data(stock, bench).copy()
+    data = joined_data(stock, bench).copy()
 
-    if len(j) < max(rs_window, sma) + 2:
-        raise ValueError("Backtest-এর জন্য আরও বেশি historical data দরকার।")
+    if len(data) < max(rs_window, sma) + 5:
+        raise ValueError(
+            "Backtest-এর জন্য আরও বেশি historical data প্রয়োজন।"
+        )
 
-    j["stock_ret"] = j["Stock"].pct_change().fillna(0)
-    j["rs"] = j["Stock"] / j["Benchmark"]
-    j["rs_ma"] = j["rs"].rolling(rs_window).mean()
-    j["price_ma"] = j["Stock"].rolling(sma).mean()
+    data["stock_ret"] = data["Stock"].pct_change().fillna(0)
+    data["rs"] = data["Stock"] / data["Benchmark"]
+    data["rs_ma"] = data["rs"].rolling(rs_window).mean()
+    data["price_ma"] = data["Stock"].rolling(sma).mean()
 
+    # Signal calculated from available closing data.
     signal = (
-        (j["rs"] > j["rs_ma"]) &
-        (j["Stock"] > j["price_ma"])
+        (data["rs"] > data["rs_ma"]) &
+        (data["Stock"] > data["price_ma"])
     ).astype(int)
 
-    j["position"] = signal.shift(1).fillna(0)
-    j["turnover"] = (
-        j["position"].diff().abs().fillna(j["position"].abs())
+    # Execute on next bar to reduce look-ahead bias.
+    data["position"] = signal.shift(1).fillna(0)
+    data["turnover"] = (
+        data["position"].diff().abs()
+        .fillna(data["position"].abs())
     )
 
-    j["strategy_ret"] = (
-        j["position"] * j["stock_ret"]
-        - j["turnover"] * cost_bps / 10000
+    data["strategy_ret"] = (
+        data["position"] * data["stock_ret"]
+        - data["turnover"] * (cost_bps / 10000)
     )
 
-    j["equity"] = capital * (1 + j["strategy_ret"]).cumprod()
-    j["buy_hold"] = capital * (1 + j["stock_ret"]).cumprod()
-    j["drawdown"] = j["equity"] / j["equity"].cummax() - 1
+    data["equity"] = capital * (
+        1 + data["strategy_ret"]
+    ).cumprod()
 
-    daily = j["strategy_ret"]
-    std = daily.std()
+    data["buy_hold"] = capital * (
+        1 + data["stock_ret"]
+    ).cumprod()
+
+    data["drawdown"] = (
+        data["equity"] / data["equity"].cummax() - 1
+    )
+
+    daily = data["strategy_ret"]
+    daily_std = daily.std()
 
     metrics = {
-        "Strategy return %": (j["equity"].iloc[-1] / capital - 1) * 100,
-        "Buy & hold return %": (j["buy_hold"].iloc[-1] / capital - 1) * 100,
-        "Max drawdown %": j["drawdown"].min() * 100,
-        "Annualized volatility %": std * np.sqrt(252) * 100,
-        "Sharpe (risk-free 0)": (
-            daily.mean() / std * np.sqrt(252) if std > 0 else np.nan
-        ),
-        "Position changes": int((j["turnover"] > 0).sum()),
-        "Observations": len(j)
+        "Strategy return %":
+            (data["equity"].iloc[-1] / capital - 1) * 100,
+        "Buy & hold return %":
+            (data["buy_hold"].iloc[-1] / capital - 1) * 100,
+        "Max drawdown %": data["drawdown"].min() * 100,
+        "Annualized volatility %":
+            daily_std * np.sqrt(252) * 100,
+        "Sharpe (risk-free 0)":
+            daily.mean() / daily_std * np.sqrt(252)
+            if pd.notna(daily_std) and daily_std > 0 else np.nan,
+        "Position changes": int((data["turnover"] > 0).sum()),
+        "Observations": len(data)
     }
 
-    return j, metrics
+    return data, metrics
 
 
-# --------------------------------------------------
-# 5. SIDEBAR
-# --------------------------------------------------
+# -------------------- Sidebar settings --------------------
 
 with st.sidebar:
-    st.header("Data settings")
+    st.header("⚙️ Data Settings")
 
-    source = st.radio("Data source", ["Yahoo Finance", "CSV upload"])
-    exchange = st.selectbox("Exchange", ["NSE (.NS)", "BSE (.BO)"])
+    source = st.radio(
+        "Data source",
+        ["Yahoo Finance", "CSV upload"]
+    )
+
+    exchange = st.selectbox(
+        "Exchange",
+        ["NSE (.NS)", "BSE (.BO)"]
+    )
+
+    today = date.today()
+    default_start = today - timedelta(days=730)
 
     start = st.date_input(
         "Start date",
-        value=date.today() - timedelta(days=730),
-        max_value=date.today()
+        value=default_start,
+        max_value=today
     )
 
     end = st.date_input(
         "End date (exclusive)",
-        value=date.today() + timedelta(days=1),
+        value=today + timedelta(days=1),
         min_value=start + timedelta(days=1)
     )
 
-    benchmark_default = "^NSEI" if exchange.startswith("NSE") else "^BSESN"
-    benchmark = st.text_input("Benchmark ticker", benchmark_default)
+    default_benchmark = (
+        "^NSEI" if exchange.startswith("NSE") else "^BSESN"
+    )
+
+    benchmark = st.text_input(
+        "Benchmark ticker",
+        default_benchmark
+    ).strip().upper()
 
     stock_csv = None
     bench_csv = None
     csv_symbol = None
 
     if source == "CSV upload":
-        stock_csv = st.file_uploader("Stock OHLCV CSV", type=["csv"])
-        bench_csv = st.file_uploader(
-            "Benchmark OHLCV CSV", type=["csv"], key="benchmark_csv"
+        stock_csv = st.file_uploader(
+            "Stock OHLCV CSV",
+            type=["csv"],
+            key="stock_upload"
         )
 
-        if stock_csv:
+        bench_csv = st.file_uploader(
+            "Benchmark OHLCV CSV",
+            type=["csv"],
+            key="bench_upload"
+        )
+
+        if stock_csv is not None:
             try:
                 stock_csv.seek(0)
-                temp = pd.read_csv(stock_csv)
-                if "Symbol" in temp.columns:
+                preview = pd.read_csv(stock_csv)
+
+                if "Symbol" in preview.columns:
                     symbols = sorted(
-                        temp["Symbol"].dropna().astype(str).unique()
+                        preview["Symbol"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
                     )
-                    csv_symbol = st.selectbox("CSV Symbol", symbols)
+
+                    if symbols:
+                        csv_symbol = st.selectbox(
+                            "Stock CSV symbol",
+                            symbols
+                        )
+
+                stock_csv.seek(0)
+
             except Exception as exc:
-                st.error(f"CSV পড়া যায়নি: {exc}")
+                st.error(f"CSV পড়তে সমস্যা: {exc}")
 
-    st.caption("Yahoo Finance ডেটা exchange-certified live feed নয়.")
+    st.caption(
+        "Yahoo Finance একটি convenience research source; "
+        "এটি guaranteed live বা exchange-certified feed নয়।"
+    )
 
 
-# --------------------------------------------------
-# 6. TABS
-# --------------------------------------------------
+# -------------------- Tabs --------------------
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Dashboard", "Relative Strength", "Scanner",
-    "Backtesting", "Data Quality"
+    "Dashboard",
+    "Relative Strength",
+    "Scanner",
+    "Backtesting",
+    "Data Quality"
 ])
 
 
-# DASHBOARD
-with tab1:
-    st.subheader("Dashboard")
-    symbol = st.text_input("Stock ticker", "RELIANCE.NS", key="dashboard_symbol")
+# ==================== TAB 1: DASHBOARD ====================
 
-    if st.button("Load dashboard"):
+with tab1:
+    st.subheader("📈 Dashboard")
+
+    symbol = st.text_input(
+        "Stock ticker",
+        "RELIANCE.NS",
+        key="dashboard_symbol"
+    ).strip().upper()
+
+    if st.button("Load Dashboard", key="load_dashboard"):
         try:
             stock, bench = load_pair(
                 symbol, source, stock_csv, bench_csv,
                 csv_symbol, start, end, benchmark
             )
 
-            j = joined_data(stock, bench)
+            data = joined_data(stock, bench)
 
-            if j.empty:
-                st.error("Stock ও benchmark-এর common trading dates নেই।")
+            if data.empty:
+                st.error("Stock ও benchmark-এর common dates নেই.")
             else:
-                sr = ret(j["Stock"], 20)
-                br = ret(j["Benchmark"], 20)
+                stock_return = ret(data["Stock"], 20)
+                bench_return = ret(data["Benchmark"], 20)
 
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Latest close", f"₹{j['Stock'].iloc[-1]:,.2f}")
-                c2.metric(
-                    "Stock 20D return",
-                    f"{sr:.2f}%" if pd.notna(sr) else "N/A"
+
+                c1.metric(
+                    "Latest Close",
+                    f"₹{data['Stock'].iloc[-1]:,.2f}"
                 )
+
+                c2.metric(
+                    "Stock 20D Return",
+                    f"{stock_return:.2f}%"
+                    if pd.notna(stock_return) else "N/A"
+                )
+
                 c3.metric(
-                    "20D excess return",
-                    f"{sr-br:.2f} pp"
-                    if pd.notna(sr) and pd.notna(br) else "N/A"
+                    "20D Excess Return",
+                    f"{stock_return - bench_return:.2f} pp"
+                    if pd.notna(stock_return) and pd.notna(bench_return)
+                    else "N/A"
                 )
 
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=j.index, y=j["Stock"], name="Stock close"
-                ))
-                fig.update_layout(template="plotly_dark", height=400)
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=data.index,
+                        y=data["Stock"],
+                        mode="lines",
+                        name="Stock Close"
+                    )
+                )
+
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=400,
+                    title=f"{symbol} Historical Close",
+                    xaxis_title="Date",
+                    yaxis_title="Price"
+                )
+
                 st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(j.tail(10), use_container_width=True)
+                st.dataframe(data.tail(10), use_container_width=True)
 
         except Exception as exc:
             st.error(f"Dashboard error: {exc}")
 
 
-# RELATIVE STRENGTH
+# ==================== TAB 2: RELATIVE STRENGTH ====================
+
 with tab2:
-    st.subheader("Relative Strength")
-    symbol = st.text_input("Stock ticker", "HINDUNILVR.NS", key="rs_symbol")
+    st.subheader("💪 Relative Strength Analysis")
+
+    symbol = st.text_input(
+        "Stock ticker",
+        "HINDUNILVR.NS",
+        key="rs_symbol"
+    ).strip().upper()
 
     periods = st.multiselect(
         "Return windows (trading days)",
@@ -423,219 +527,186 @@ with tab2:
         default=[20, 60, 120]
     )
 
-    if st.button("Calculate RS"):
+    if st.button("Calculate RS", key="calculate_rs"):
         try:
             stock, bench = load_pair(
                 symbol, source, stock_csv, bench_csv,
                 csv_symbol, start, end, benchmark
             )
 
-            j = joined_data(stock, bench)
+            data = joined_data(stock, bench)
 
-            if len(j) < 2:
+            if len(data) < 2:
                 st.error("Common trading data অপর্যাপ্ত।")
             else:
+                result = rs_stats(data, periods or [20])
                 st.dataframe(
-                    rs_stats(j, periods or [20]).round(4),
+                    result.round(4),
                     use_container_width=True
                 )
 
-                ratio = j["Stock"] / j["Benchmark"]
+                ratio = data["Stock"] / data["Benchmark"]
+                normalized_rs = ratio / ratio.iloc[0] * 100
+
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=j.index, y=j["Stock"], name="Stock close"
-                ))
-                fig.add_trace(go.Scatter(
-                    x=j.index, y=j["Benchmark"], name="Benchmark close"
-                ))
-                fig.add_trace(go.Scatter(
-                    x=j.index,
-                    y=ratio / ratio.iloc[0] * 100,
-                    name="Normalized RS",
-                    yaxis="y2"
-                ))
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=data.index,
+                        y=data["Stock"],
+                        name="Stock Close"
+                    )
+                )
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=data.index,
+                        y=data["Benchmark"],
+                        name="Benchmark Close"
+                    )
+                )
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=data.index,
+                        y=normalized_rs,
+                        name="Normalized RS (start=100)",
+                        yaxis="y2"
+                    )
+                )
+
                 fig.update_layout(
                     template="plotly_dark",
-                    height=470,
-                    yaxis2=dict(overlaying="y", side="right")
+                    height=450,
+                    title="Stock vs Benchmark",
+                    yaxis=dict(title="Price / Index"),
+                    yaxis2=dict(
+                        title="Normalized RS",
+                        overlaying="y",
+                        side="right"
+                    )
                 )
+
                 st.plotly_chart(fig, use_container_width=True)
 
                 st.info(
-                    "Excess Return = Stock Return − Benchmark Return. "
-                    "এটি RSI নয় এবং একা buy/sell signal নয়।"
+                    "Excess Return = Stock Return − Benchmark Return "
+                    "(percentage points)। Relative Strength এখানে "
+                    "RSI নয় এবং একা Buy/Sell signal নয়।"
                 )
 
         except Exception as exc:
-            st.error(f"RS error: {exc}")
+            st.error(f"Relative Strength error: {exc}")
 
 
-# SCANNER
+# ==================== TAB 3: SCANNER ====================
+
 with tab3:
-    st.subheader("Manual-universe scanner")
-    st.caption("এটি বেছে নেওয়া ticker-গুলো স্ক্যান করে; সম্পূর্ণ NSE/BSE universe নয়।")
+    st.subheader("🔎 Cash Market Scanner")
 
-    raw = st.text_area(
-        "Symbols comma-separated",
+    st.caption(
+        "এটি manually selected ticker universe scan করে। "
+        "এটি সম্পূর্ণ NSE/BSE symbol master নয়।"
+    )
+
+    raw_symbols = st.text_area(
+        "Symbols — comma-separated",
         "RELIANCE,HINDUNILVR,ICICIBANK,INFY,TCS"
     )
 
-    c1, c2, c3 = st.columns(3)
-    trend_on = c1.checkbox("Close > SMA50", True)
-    rs_on = c2.checkbox("20D excess return threshold", True)
-    vol_on = c3.checkbox("Volume > 20D average", False)
+    col1, col2, col3 = st.columns(3)
 
-    threshold = st.number_input("Minimum excess return (pp)", value=0.0, step=0.5)
-    limit = st.slider("Maximum symbols", 1, 30, 10)
+    trend_on = col1.checkbox("Close > SMA50", value=True)
+    rs_on = col2.checkbox("20D Excess Return threshold", value=True)
+    volume_on = col3.checkbox("Volume > 20D average", value=False)
 
-    if st.button("Run scanner"):
+    threshold = st.number_input(
+        "Minimum excess return (percentage points)",
+        min_value=-100.0,
+        max_value=100.0,
+        value=0.0,
+        step=0.5
+    )
+
+    limit = st.slider(
+        "Maximum symbols",
+        min_value=1,
+        max_value=30,
+        value=10
+    )
+
+    if st.button("Run Scanner", key="run_scanner"):
         if source != "Yahoo Finance":
-            st.warning("Multi-symbol scanner-এর জন্য Yahoo Finance নির্বাচন করুন।")
+            st.warning(
+                "Multi-symbol scanner বর্তমানে Yahoo Finance mode-এ চলে। "
+                "RS ও Backtesting-এর জন্য CSV mode ব্যবহার করতে পারেন।"
+            )
         else:
             symbols = [
-                x.strip().upper()
-                for x in raw.replace("\n", ",").split(",")
-                if x.strip()
+                item.strip().upper()
+                for item in raw_symbols.replace("\n", ",").split(",")
+                if item.strip()
             ][:limit]
 
-            suffix = ".NS" if exchange.startswith("NSE") else ".BO"
-            symbols = [
-                x if "." in x or x.startswith("^") else x + suffix
-                for x in symbols
-            ]
+            if exchange.startswith("NSE"):
+                symbols = [
+                    item if "." in item or item.startswith("^")
+                    else item + ".NS"
+                    for item in symbols
+                ]
+            else:
+                symbols = [
+                    item if "." in item or item.startswith("^")
+                    else item + ".BO"
+                    for item in symbols
+                ]
 
-            rows, errors = [], []
+            rows = []
+            errors = []
 
             try:
-                bench = yahoo(benchmark, start, end)
+                bench = yahoo(benchmark, str(start), str(end))
             except Exception as exc:
                 bench = None
                 st.error(f"Benchmark error: {exc}")
 
-            if bench is not None:
+            if bench is not None and symbols:
                 progress = st.progress(0)
 
                 for i, ticker in enumerate(symbols):
                     try:
-                        stock = yahoo(ticker, start, end)
-                        j = joined_data(stock, bench)
+                        stock = yahoo(ticker, str(start), str(end))
+                        data = joined_data(stock, bench)
                         ind = indicators(stock)
 
-                        if len(j) < 55:
-                            raise ValueError("কমপক্ষে প্রায় 55 common observations দরকার।")
+                        if len(data) < 55:
+                            raise ValueError(
+                                "প্রায় 55 বা তার বেশি common "
+                                "trading observations প্রয়োজন।"
+                            )
 
-                        sr = ret(j["Stock"], 20)
-                        br = ret(j["Benchmark"], 20)
-                        excess = sr - br if pd.notna(sr) and pd.notna(br) else np.nan
+                        stock_return = ret(data["Stock"], 20)
+                        bench_return = ret(data["Benchmark"], 20)
 
-                        last = ind.iloc[-1]
-                        ok_trend = bool(
-                            pd.notna(last["SMA50"])
-                            and last["Close"] > last["SMA50"]
+                        excess = (
+                            stock_return - bench_return
+                            if pd.notna(stock_return)
+                            and pd.notna(bench_return)
+                            else np.nan
                         )
-                        ok_vol = bool(
-                            pd.notna(last["AvgVol20"])
-                            and last["Volume"] > last["AvgVol20"]
+
+                        latest = ind.iloc[-1]
+
+                        trend_pass = bool(
+                            pd.notna(latest["SMA50"])
+                            and latest["Close"] > latest["SMA50"]
+                        )
+
+                        volume_pass = bool(
+                            pd.notna(latest["AvgVol20"])
+                            and latest["Volume"] > latest["AvgVol20"]
                         )
 
                         checks = []
-                        if trend_on:
-                            checks.append(ok_trend)
-                        if rs_on:
-                            checks.append(
-                                pd.notna(excess) and excess > threshold
-                            )
-                        if vol_on:
-                            checks.append(ok_vol)
 
-                        rows.append({
-                            "Ticker": ticker,
-                            "Close": last["Close"],
-                            "Stock 20D %": sr,
-                            "Benchmark 20D %": br,
-                            "Excess pp": excess,
-                            "Close>SMA50": ok_trend,
-                            "Volume>Avg20": ok_vol,
-                            "PASS": all(checks) if checks else True
-                        })
-
-                    except Exception as exc:
-                        errors.append({"Ticker": ticker, "Error": str(exc)})
-
-                    progress.progress((i + 1) / max(1, len(symbols)))
-
-                if rows:
-                    result = pd.DataFrame(rows).sort_values(
-                        ["PASS", "Excess pp"],
-                        ascending=[False, False],
-                        na_position="last"
-                    )
-                    st.dataframe(result, use_container_width=True)
-                    st.download_button(
-                        "Download scanner CSV",
-                        result.to_csv(index=False).encode("utf-8"),
-                        "scanner_results.csv",
-                        "text/csv"
-                    )
-                    st.success(f"Processed {len(rows)} symbols.")
-
-                if errors:
-                    st.warning(f"{len(errors)} ticker-এ ডেটা সমস্যা হয়েছে।")
-                    st.dataframe(pd.DataFrame(errors), use_container_width=True)
-
-                if not rows:
-                    st.warning("কোনো ticker-এর বৈধ ডেটা পাওয়া যায়নি।")
-
-
-# BACKTEST
-with tab4:
-    st.subheader("Backtesting")
-    st.warning(
-        "শিক্ষামূলক baseline. Taxes, slippage, corporate actions, "
-        "delisted stocks এবং survivorship bias সম্পূর্ণভাবে model করা হয়নি।"
-    )
-
-    symbol = st.text_input("Stock ticker", "HINDUNILVR.NS", key="bt_symbol")
-
-    c1, c2, c3, c4 = st.columns(4)
-    rs_window = c1.slider("RS moving average", 5, 100, 20)
-    sma = c2.slider("Price SMA", 20, 200, 50)
-    capital = c3.number_input(
-        "Initial capital ₹", min_value=1000, value=100000, step=1000
-    )
-    cost = c4.number_input(
-        "Cost per position change (bps)",
-        min_value=0, max_value=200, value=10, step=5
-    )
-
-    if st.button("Run backtest"):
-        try:
-            stock, bench = load_pair(
-                symbol, source, stock_csv, bench_csv,
-                csv_symbol, start, end, benchmark
-            )
-
-            bt, metrics = backtest(
-                stock, bench, rs_window, sma, capital, cost
-            )
-
-            cols = st.columns(4)
-            cols[0].metric("Strategy return", f"{metrics['Strategy return %']:.2f}%")
-            cols[1].metric("Buy & hold", f"{metrics['Buy & hold return %']:.2f}%")
-            cols[2].metric("Max drawdown", f"{metrics['Max drawdown %']:.2f}%")
-            cols[3].metric("Position changes", str(metrics["Position changes"]))
-
-            st.write(metrics)
-
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=bt.index, y=bt["equity"], name="Strategy equity"
-            ))
-            fig.add_trace(go.Scatter(
-                x=bt.index, y=bt["buy_hold"], name="Buy & hold"
-            ))
-            fig.update_layout(template="plotly_dark", height=400)
-            st.plotly_chart(fig, use_container_width=True)
-
-            dd = go.Figure(go.Scatter(
-          
+                        if trend_o
