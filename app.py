@@ -231,7 +231,7 @@ def load_pair(
     return stock, bench
 
 
-# -------------------- Core calculations --------------------
+               # -------------------- Core calculations --------------------
 
 def ret(series, n):
     if len(series) <= n:
@@ -361,7 +361,7 @@ def backtest(stock, bench, rs_window, sma, capital, cost_bps):
     return data, metrics
 
 
-# -------------------- Sidebar settings --------------------
+            # -------------------- Sidebar settings --------------------
 
 with st.sidebar:
     st.header("⚙️ Data Settings")
@@ -618,7 +618,6 @@ with tab2:
         except Exception as exc:
             st.error(f"Relative Strength error: {exc}")
 
-
 # ==================== TAB 3: SCANNER ====================
 
 with tab3:
@@ -714,4 +713,192 @@ with tab3:
 
                         trend_pass = bool(
                             pd.notna(latest["SMA50"])
-          
+                            and latest["Close"] > latest["SMA50"]
+                        )
+
+                        volume_pass = bool(
+                            pd.notna(latest["AvgVol20"])
+                            and latest["Volume"] > latest["AvgVol20"]
+                        )
+
+                        rs_pass = bool(
+                            pd.notna(excess) and excess >= threshold
+                        )
+
+                        checks = []
+
+                        if trend_on:
+                            checks.append(trend_pass)
+
+                        if rs_on:
+                            checks.append(rs_pass)
+
+                        if volume_on:
+                            checks.append(volume_pass)
+
+                        passed = all(checks) if checks else True
+
+                        rows.append({
+                            "Symbol": ticker,
+                            "Close": latest["Close"],
+                            "SMA50": latest["SMA50"],
+                            "20D Stock %": stock_return,
+                            "20D Bench %": bench_return,
+                            "20D Excess (pp)": excess,
+                            "Trend": "✅" if trend_pass else "❌",
+                            "RS": "✅" if rs_pass else "❌",
+                            "Volume": "✅" if volume_pass else "❌",
+                            "Match": "✅" if passed else "❌"
+                        })
+
+                    except Exception as exc:
+                        errors.append(f"{ticker}: {exc}")
+
+                    progress.progress((i + 1) / len(symbols))
+
+                progress.empty()
+
+                if rows:
+                    result = pd.DataFrame(rows)
+                    matched = result[result["Match"] == "✅"]
+
+                    st.success(
+                        f"{len(result)}টির মধ্যে {len(matched)}টি match করেছে।"
+                    )
+                    st.dataframe(
+                        matched.round(2),
+                        use_container_width=True
+                    )
+
+                    with st.expander("সব scanned symbol দেখুন"):
+                        st.dataframe(
+                            result.round(2),
+                            use_container_width=True
+                        )
+
+                if errors:
+                    with st.expander(f"⚠️ {len(errors)}টি error"):
+                        for e in errors:
+                            st.write(e)
+
+
+# ==================== TAB 4: BACKTESTING ====================
+
+with tab4:
+    st.subheader("🧪 Backtesting")
+
+    bt_symbol = st.text_input(
+        "Stock ticker",
+        "RELIANCE.NS",
+        key="bt_symbol"
+    ).strip().upper()
+
+    b1, b2, b3, b4 = st.columns(4)
+
+    rs_window = b1.number_input("RS MA window", 5, 200, 50)
+    sma_window = b2.number_input("Price SMA window", 5, 200, 50)
+    capital = b3.number_input("Capital (₹)", 10000, 100000000, 100000)
+    cost_bps = b4.number_input("Cost (bps)", 0.0, 100.0, 10.0)
+
+    if st.button("Run Backtest", key="run_backtest"):
+        try:
+            stock, bench = load_pair(
+                bt_symbol, source, stock_csv, bench_csv,
+                csv_symbol, start, end, benchmark
+            )
+
+            bt, metrics = backtest(
+                stock, bench,
+                int(rs_window), int(sma_window),
+                float(capital), float(cost_bps)
+            )
+
+            cols = st.columns(3)
+            for i, (name, value) in enumerate(metrics.items()):
+                if isinstance(value, float):
+                    text = "N/A" if pd.isna(value) else f"{value:,.2f}"
+                else:
+                    text = str(value)
+                cols[i % 3].metric(name, text)
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=bt.index, y=bt["equity"], name="Strategy"
+            ))
+            fig.add_trace(go.Scatter(
+                x=bt.index, y=bt["buy_hold"], name="Buy & Hold"
+            ))
+            fig.update_layout(
+                template="plotly_dark",
+                height=420,
+                title="Equity Curve",
+                xaxis_title="Date",
+                yaxis_title="Value (₹)"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            dd = go.Figure()
+            dd.add_trace(go.Scatter(
+                x=bt.index, y=bt["drawdown"] * 100,
+                fill="tozeroy", name="Drawdown %"
+            ))
+            dd.update_layout(
+                template="plotly_dark",
+                height=300,
+                title="Drawdown %"
+            )
+            st.plotly_chart(dd, use_container_width=True)
+
+        except Exception as exc:
+            st.error(f"Backtest error: {exc}")
+
+
+# ==================== TAB 5: DATA QUALITY ====================
+
+with tab5:
+    st.subheader("🧹 Data Quality")
+
+    dq_symbol = st.text_input(
+        "Stock ticker",
+        "RELIANCE.NS",
+        key="dq_symbol"
+    ).strip().upper()
+
+    if st.button("Check Data", key="check_data"):
+        try:
+            stock, bench = load_pair(
+                dq_symbol, source, stock_csv, bench_csv,
+                csv_symbol, start, end, benchmark
+            )
+
+            data = joined_data(stock, bench)
+
+            q1, q2, q3 = st.columns(3)
+            q1.metric("Stock rows", len(stock))
+            q2.metric("Benchmark rows", len(bench))
+            q3.metric("Common dates", len(data))
+
+            st.write(
+                f"Stock range: {stock.index.min().date()} → "
+                f"{stock.index.max().date()}"
+            )
+            st.write(
+                f"Benchmark range: {bench.index.min().date()} → "
+                f"{bench.index.max().date()}"
+            )
+
+            zero_vol = int((stock["Volume"] == 0).sum())
+            st.write(f"Zero-volume days: {zero_vol}")
+
+            if len(data) < 60:
+                st.warning(
+                    "Common data কম। Scanner-এর জন্য অন্তত 55 দিন লাগে।"
+                )
+            else:
+                st.success("ডেটা যথেষ্ট আছে।")
+
+            st.dataframe(stock.tail(10), use_container_width=True)
+
+        except Exception as exc:
+            st.error(f"Data quality error: {exc}")
+    
